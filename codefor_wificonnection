@@ -1,0 +1,115 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// WiFi credentials
+const char* ssid = "ESP32";
+const char* password = "PASSWORD";
+
+// Create web server on port 80
+WebServer server(80);
+
+// HTML Webpage for the Function Generator Control
+const char MAIN_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Function Generator Control</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            text-align: center; 
+            background-color: rgb(157, 89, 208);
+        }
+        h1 { 
+            font-size: 24px; 
+            margin-bottom: 30px; /* Add spacing after the title */
+        }
+        button { 
+            display: block; 
+            margin: 20px auto; /* Increase spacing between buttons */
+            padding: 10px 20px; 
+            font-size: 18px; 
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <br>
+    <br>
+    <h1>Function Generator Control</h1>
+    <br>
+
+    <button onclick="sendCommand('cycle_waveform')">Cycle Waveform</button>
+    <button onclick="sendCommand('freq_up')">Frequency Up</button>
+    <button onclick="sendCommand('freq_down')">Frequency Down</button>
+    <button onclick="sendCommand('getvalue')">Get Value of output</button>
+
+    <script>
+        function sendCommand(command) {
+            fetch('/' + command)
+            .then(response => console.log(command + ' command sent'))
+            .catch(error => console.error('Error:', error));
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// Global variables
+float frequency = 1.0;
+int waveform = 0; // 0: Triangle, 1: Square, 2: Sine
+
+// Handle web requests
+void handleRoot() {
+    server.send(200, "text/html", MAIN_page);
+}
+
+// Function to handle button commands
+void handleCommand() {
+    String command = server.uri().substring(1); // Get command from URL
+    Serial.println("Received command: " + command);
+
+    if (command == "cycle_waveform") {
+        // Cycle waveform
+        waveform = (waveform + 1) % 3; // Cycle through 0, 1, 2
+        String waveFormName = waveform == 0 ? "Triangle" : waveform == 1 ? "Square" : "Sine";
+        Serial.println("Waveform: " + waveFormName);
+    } else if (command == "freq_up") {
+        // Increase frequency
+        frequency *= 10;
+        Serial.println("Frequency: " + String(frequency));
+    } else if (command == "freq_down") {
+        // Decrease frequency
+        frequency /= 10;
+        Serial.println("Frequency: " + String(frequency));
+    } else if (command == "getvalue") {
+        // Get voltage value at port 1 (GPIO1)
+        int analogValue = analogRead(1);
+        float voltage = analogValue * (3.3 / 4095.0); // Assuming 12-bit ADC and 3.3V reference
+        Serial.println("Voltage at GPIO1: " + String(voltage) + " V");
+        server.send(200, "text/plain", "Voltage at GPIO1: " + String(voltage) + " V");
+    } 
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    // Connect to WiFi
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nConnected to WiFi!");
+    Serial.println(WiFi.localIP()); // Print ESP32's IP Address
+
+    // Start server
+    server.on("/", handleRoot);
+    server.onNotFound(handleCommand);
+    server.begin();
+}
+
+void loop() {
+    server.handleClient();
+}

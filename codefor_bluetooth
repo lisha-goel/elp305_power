@@ -1,0 +1,336 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>          
+#include <Adafruit_SSD1306.h>
+// #include <AD9833.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define SCREEN_ADDRESS 0x3C  // I2C address
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
+// Define button pins
+const int wave_selector_btn = 33;
+const int reset_btn = 32;
+const int menu_btn = 25;
+const int sel_pin = 13;  // Added sel pin to pin 4
+
+
+bool blink_state = true;
+
+
+// State-related variables
+int cursorPosition = 5; // Tracks position of cursor on frequency
+int currentScreen = 0;  // 0 = control screen, 1 = specs, 2 = error
+float frequency = 2000.000; // Default frequency in Hz
+float voltage = 0.0;      // Voltage reading
+portMUX_TYPE myMutex = portMUX_INITIALIZER_UNLOCKED;
+String waveType = "Square"; // Default wave type
+char freqStr[8] = {'2', '0', '0', '0', '.', '0', '0', '0'};
+
+// Frequency ranges
+const float freqLimits[3] = {1.0, 1000.0, 1000000.0}; // Hz, kHz, MHz
+int freqUnitIndex = 0; // Current frequency unit: 0 = Hz, 1 = kHz, 2 = MHz
+
+const int DAC_PIN = 26;
+const int TABLE_SIZE = 256;
+
+float sinTable[TABLE_SIZE];
+float sawTable[TABLE_SIZE];
+float triTable[TABLE_SIZE];
+//////////////////////////////////////////////////////////
+//FUNCTION GENERATOR
+//////////////////////////////////////////////////////////
+
+class FunctionGenerator {
+public:
+  // Initialize the function generator
+  void init() {
+    Wire.begin();  // Initialize the Wire library for I2C communication
+    
+    pinMode(DAC_PIN, OUTPUT);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.begin(9600);
+    Serial.println(F("SSD1306 allocation failed"));
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);  // Set text color to white
+  display.setCursor(0, 0);
+  display.println("Initializing...");
+  display.display();
+    pinMode(4, INPUT); // Joystick X-axis (Horizontal on pin 5)
+    pinMode(0, INPUT); // Joystick Y-axis (Vertical on pin 6)
+    pinMode(wave_selector_btn, INPUT_PULLUP);
+    pinMode(reset_btn, INPUT_PULLUP);
+    pinMode(menu_btn, INPUT_PULLUP);
+    pinMode(sel_pin, INPUT_PULLUP);  // Set sel pin to input with pullup
+
+    // signalGenerator.begin();
+    displayControlScreen();
+  }
+//////////////////////////////////////////////////////////
+//DISPLAY
+//////////////////////////////////////////////////////////
+
+  void displayControlScreen() {
+    display.clearDisplay();
+
+    display.setCursor(10, 20);
+    display.print("Wave: ");
+    portENTER_CRITICAL(&myMutex);
+    display.println(waveType);
+    portEXIT_CRITICAL(&myMutex);
+    display.setCursor(10, 35);
+    display.print("Freq: ");
+    display.print(freqStr);
+    display.print(getFrequencyUnit());
+    display.println("Hz");
+
+    display.setCursor(10, 50);
+    display.print("Amp: ");
+    display.print(voltage);
+    display.println("V");
+
+    if (blink_state) {
+        display.setCursor(46+(cursorPosition-5)*6, 37);
+        display.print("_");
+        delay(200);
+        display.setCursor(46+(cursorPosition-5)*6, 37);
+        display.print(" ");
+        delay(200);
+        display.setCursor(46+(cursorPosition-5)*6, 37);
+
+        display.print("_");
+        delay(200);
+        display.setCursor(46+(cursorPosition-5)*6, 37);
+        display.print(" ");
+    }
+
+    display.display();
+  }
+
+  void displaySpecs() {
+    display.clearDisplay();
+
+    display.setCursor(5, 20);
+    display.println("Voltage Limit: 0-20V");
+
+    display.setCursor(5, 35);
+    display.println("Freq: 1Hz-25MHz");
+
+    display.display();
+  }
+
+  void displayError() {
+    display.clearDisplay();
+
+    display.setCursor(5, 20);
+    display.println("Voltage Err: +/-0.1V");
+
+    display.setCursor(5, 35);
+    display.println("Freq Err: +/-0.01%");
+
+    display.display(); 
+  }
+
+//////////////////////////////////////////////////////////
+//BUTTON
+//////////////////////////////////////////////////////////
+
+  void updateFrequency(int change) {
+    if (cursorPosition != 13) {
+      int x = (int(freqStr[cursorPosition - 5] - '0') + change) % 10;
+      if(x == -1) x = 9;
+      freqStr[cursorPosition - 5] = '0' + x;
+    } else {
+      freqUnitIndex = (freqUnitIndex + 1) % 3;
+    }
+    setSignal();
+  }
+
+  // Handle wave selection
+  void selectWave() {
+    portENTER_CRITICAL(&myMutex);
+    if (waveType == "Square") {
+      waveType = "Triangle";
+    } else if (waveType == "Triangle") {
+      waveType = "Sine";
+    } else {
+      waveType = "Square";
+    }
+    portEXIT_CRITICAL(&myMutex);
+    setSignal(); // Update the signal type on AD9833
+  }
+
+  // Get frequency unit as string
+  String getFrequencyUnit() {
+    if (freqUnitIndex == 0) return " ";
+    if (freqUnitIndex == 1) return "k";
+    if (freqUnitIndex == 2) return "M";
+    
+    return " ";
+  }
+
+  // Reset to initial state
+  void reset() {
+    frequency = 2000.0;
+    const char defaultValues[8] = {'2', '0', '0', '0', '.', '0', '0', '0'};
+
+    for (int i = 0; i < 8; i++) {
+      freqStr[i] = defaultValues[i];
+    }
+    voltage = 0.0;
+    portENTER_CRITICAL(&myMutex);
+    waveType = "Square";
+    portEXIT_CRITICAL(&myMutex);
+    cursorPosition = 5;
+    currentScreen = 0;
+    displayControlScreen();
+    setSignal();
+  }
+
+
+
+//////////////////////////////////////////////////////////
+//Signal
+//////////////////////////////////////////////////////////
+
+
+  void generate_sine(int frequency) {
+    int delay_us = 1000000 / (frequency * TABLE_SIZE);
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        int dacValue = map(sinTable[i] * 1000, -1000, 1000, 0, 255);
+        dacWrite(DAC_PIN, dacValue);
+        delayMicroseconds(delay_us);
+    }
+  }
+
+  void generate_sawtooth(int frequency) {
+      int delay_us = 1000000 / (frequency * TABLE_SIZE);
+      for (int i = 0; i < TABLE_SIZE; i++) {
+          int dacValue = map(sawTable[i] * 1000, 0, 1000, 0, 255);
+          dacWrite(DAC_PIN, dacValue);
+          delayMicroseconds(delay_us);
+      }
+  }
+
+  void generate_triangle(int frequency) {
+      int delay_us = 1000000 / (frequency * TABLE_SIZE);
+      for (int i = 0; i < TABLE_SIZE; i++) {
+          dacWrite(DAC_PIN, triTable[i]);
+          delayMicroseconds(delay_us);
+      }
+  }
+
+  void initialise_signals(){
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        sinTable[i] = sin((float)i / TABLE_SIZE * 2 * PI);
+        sawTable[i] = (float)i / TABLE_SIZE;
+        triTable[i] = (i < TABLE_SIZE / 2) ? map(i, 0, TABLE_SIZE / 2 - 1, 0, 255) : map(i, TABLE_SIZE / 2, TABLE_SIZE - 1, 255, 0);
+    }
+  }
+
+  void setSignal() {
+    portENTER_CRITICAL(&myMutex);
+    String type = waveType;
+    String str = String(freqStr);
+    double freq = str.toFloat();
+    portEXIT_CRITICAL(&myMutex);
+    if (freqUnitIndex == 1) freq*=1e3;
+    if (freqUnitIndex == 2) freq*=1e6;
+    if (type == "Sine") {
+      generate_sine((int)freq);
+    } else if (type == "Square") {
+      generate_sawtooth((int)freq);
+    } else if (type == "Triangle") {
+      generate_triangle((int)freq);
+    }
+  }
+
+};
+
+//////////////////////////////////////////////////////////
+//GLOBAL
+//////////////////////////////////////////////////////////
+FunctionGenerator generator;
+
+void setSignalTask(void *pvParameters) {
+  while (true) {
+    generator.setSignal(); // Call your setSignal function to run continuously
+    vTaskDelay(1); // Yield to other tasks (you can adjust delay as per requirement)
+  }
+}
+// Function generator handler
+void function_generator_handler() {
+  // Handle screen selection using menu button
+  
+  int joyX = analogRead(4); // Read horizontal movement
+  int joyY = analogRead(0); // Read vertical movement
+
+  if (digitalRead(menu_btn) == LOW) {
+    currentScreen = (currentScreen + 1) % 3; // Cycle through screens
+    if (currentScreen == 0) {
+      generator.displayControlScreen();
+    } else if (currentScreen == 1) {
+      generator.displaySpecs();
+    } else {
+      generator.displayError();
+    }
+    delay(200); // Debounce
+  }
+
+  // Handle wave selection button
+  if (digitalRead(wave_selector_btn) == LOW || digitalRead(sel_pin) == LOW) { // Check sel pin or button
+    generator.selectWave();
+    generator.displayControlScreen();
+    delay(200); // Debounce
+  }
+
+  // Reset functionality
+  if (digitalRead(reset_btn) == LOW) {
+    generator.reset();
+    delay(200); // Debounce
+  }
+
+  // Handle cursor movement with joystick
+  if (joyX == 4095) { // Move cursor left
+    cursorPosition = max(5, cursorPosition - 1);
+    if(cursorPosition == 9)cursorPosition--;
+    generator.displayControlScreen();
+    delay(200); // Debounce
+  }else if (joyX == 0) { // Move cursor right
+    cursorPosition = min(13, cursorPosition + 1);
+    if(cursorPosition == 9)cursorPosition++;
+    generator.displayControlScreen();
+    delay(200); // Debounce
+  }else if (joyY == 4095) { // Increase value at cursor position
+    generator.updateFrequency(1);
+    generator.displayControlScreen();
+    delay(200); // Debounce
+  }else if (joyY == 0) { // Decrease value at cursor position
+    generator.updateFrequency(-1);
+    generator.displayControlScreen();
+    delay(200); // Debounce
+  }
+
+  float new_voltage = (analogRead(12)) * (20.0 / 4095.0); // Scale to 0-20V
+
+  // Update voltage if changed
+  if (new_voltage != voltage) {
+    voltage = new_voltage;
+    generator.displayControlScreen();
+  }
+}
+
+void setup() {
+  generator.init();
+  xTaskCreatePinnedToCore(setSignalTask,"setSignalTask",4096,NULL,1,NULL,0);
+}
+
+void loop() {
+  function_generator_handler();
+}
